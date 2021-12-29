@@ -15,94 +15,220 @@ provider "azurerm" {
   client_id         = "9c9abee0-6b5e-4627-b077-eb606fcde12f"
   client_secret     = "K5dgfF_oC_M_Qkm9uZaeohR7h9muxJjdcP"
 }
-
-## <https://www.terraform.io/docs/providers/azurerm/r/resource_group.html>
-resource "azurerm_resource_group" "rg" {
-  name     = "invokesqlcmd-install-rg"
-  location = "eastus"
+#Create Azure Resource Group
+resource "azurerm_resource_group" "main" {
+  name     = "${var.prefix}-resources"
+  location = var.location
 }
-
-## <https://www.terraform.io/docs/providers/azurerm/r/availability_set.html>
-resource "azurerm_availability_set" "availability_set" {
-  name                = "availability_set"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
-}
-
-## <https://www.terraform.io/docs/providers/azurerm/r/virtual_network.html>
-resource "azurerm_virtual_network" "vnet" {
-  name                = "vNet"
+#Create Azure Virtual Network
+resource "azurerm_virtual_network" "main" {
+  name                = "${var.prefix}-network"
   address_space       = ["10.0.0.0/16"]
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
 }
-
-## <https://www.terraform.io/docs/providers/azurerm/r/subnet.html> 
-resource "azurerm_subnet" "subnet" {
+#Create Azure VNet Subnet
+resource "azurerm_subnet" "internal" {
   name                 = "internal"
-  resource_group_name  = azurerm_resource_group.rg.name
-  virtual_network_name = azurerm_virtual_network.vnet.name
-  address_prefixes       = ["10.0.1.0/24"]
-}
+  resource_group_name  = azurerm_resource_group.main.name
+  virtual_network_name = azurerm_virtual_network.main.name
+  address_prefixes     = ["10.0.2.0/24"]
+  delegation {
+    name = "managedinstancedelegation"
 
-resource "azurerm_subnet" "subnet2" {
-  name                 = "AzureBastionSubnet"
-  resource_group_name  = azurerm_resource_group.rg.name
-  virtual_network_name = azurerm_virtual_network.vnet.name
-  address_prefixes     = ["192.168.1.224/27"]
+    service_delegation {
+      name    = "Microsoft.Sql/managedInstances"
+      actions = ["Microsoft.Network/virtualNetworks/subnets/join/action", "Microsoft.Network/virtualNetworks/subnets/prepareNetworkPolicies/action", "Microsoft.Network/virtualNetworks/subnets/unprepareNetworkPolicies/action"]
+    }
+  }
 }
-## <https://www.terraform.io/docs/providers/azurerm/r/network_interface.html>
-resource "azurerm_network_interface" "my-nic" {
-  name                = "my-nic"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
+#Create Azure Bastion Subnet
+resource "azurerm_subnet" "AzureBastionSubnet" {
+  name                ="AzureBastionSubnet"
+  resource_group_name = azurerm_resource_group.main.name
+  virtual_network_name = azurerm_virtual_network.main.name
+  address_prefixes     = ["10.0.3.0/27"]
+  
+}
+#Create Azure Network Interface Card
+resource "azurerm_network_interface" "mytestnic" {
+  name                = "mytestnic"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
 
   ip_configuration {
     name                          = "internal"
-    subnet_id                     = azurerm_subnet.subnet.id
+    subnet_id                     = azurerm_subnet.internal.id
     private_ip_address_allocation = "Dynamic"
   }
 }
-resource "azurerm_public_ip" "my-ip" {
-  name                = "bastion_ip"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
-  allocation_method   = "Static"
-  sku                 = "Standard"
-}
-resource "azurerm_bastion_host" "my-bastion" {
-  name                = "my-bastion"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rh.name
+#Create Azure Network Security Group With The Appropriate Security Rules
+resource "azurerm_network_security_group" "mytestnsg" {
+  name                          = "mytestnsg"
+  location                      = azurerm_resource_group.main.location
+  resource_group_name           = azurerm_resource_group.main.name
 
-  ip_configuration {
-    name                 = "configuration"
-    subnet_id            = azurerm_subnet.subnet2.id
-    public_ip_address_id = azurerm_public_ip.my-ip.id
-  }
-}
-## <https://www.terraform.io/docs/providers/azurerm/r/windows_virtual_machine.html>
-resource "azurerm_windows_virtual_machine" "my-winvm" {
-  name                = "my-winvm"
-  resource_group_name = azurerm_resource_group.rg.name
-  location            = azurerm_resource_group.rg.location
-  size                = "Standard_B2s"
-  admin_username      = "adminuser"
-  admin_password      = "P@$$w0rd1234!"
-  availability_set_id = azurerm_availability_set.availability_set.id
-  network_interface_ids = [
-    azurerm_network_interface.my-nic.id,
-  ]
+    security_rule {
+        name                       = "AllowHttpsInbound"
+        priority                   = 120
+        direction                  = "Inbound"
+        access                     = "Allow"
+        protocol                   = "Tcp"
+        source_port_range          = "*"
+        destination_port_range     = "443"
+        source_address_prefix      = "Internet"
+        destination_address_prefix = "*"
+    }
 
-  os_disk {
-    caching              = "ReadWrite"
-    storage_account_type = "Standard_LRS"
-  }
+    security_rule {
+        name                       = "AllowGatewayManagerInbound"
+        priority                   = 130
+        direction                  = "Inbound"
+        access                     = "Allow"
+        protocol                   = "Tcp"
+        source_port_range          = "*"
+        destination_port_range     = "443"
+        source_address_prefix      = "GatewayManager"
+        destination_address_prefix = "*"
+    }
+
+    security_rule {
+        name                       = "AllowAzureLoadBalancerInbound"
+        priority                   = 140
+        direction                  = "Inbound"
+        access                     = "Allow"
+        protocol                   = "Tcp"
+        source_port_range          = "*"
+        destination_port_range     = "443"
+        source_address_prefix      = "AzureLoadBalancer"
+        destination_address_prefix = "*"
+    }
+
+    security_rule {
+        name                       = "AllowBastionHostCommunication1"
+        priority                   = 150
+        direction                  = "Inbound"
+        access                     = "Allow"
+        protocol                   = "Tcp"
+        source_port_range          = "*"
+        destination_port_range     ="8080"
+        source_address_prefix      = "VirtualNetwork"
+        destination_address_prefix = "*"
+    }
+
+    security_rule {
+        name                       = "AllowBastionHostCommunication2"
+        priority                   = 160
+        direction                  = "Inbound"
+        access                     = "Allow"
+        protocol                   = "Tcp"
+        source_port_range          = "*"
+        destination_port_range     ="5701"
+        source_address_prefix      = "VirtualNetwork"
+        destination_address_prefix = "*"
+    }
+
+    security_rule {
+        name                       = "AllowSshRdpOutbound1"
+        priority                   = 100
+        direction                  = "Outbound"
+        access                     = "Allow"
+        protocol                   = "*"
+        source_port_range          = "*"
+        destination_port_range     ="22"
+        source_address_prefix      = "*"
+        destination_address_prefix = "VirtualNetwork"
+    }
+
+
+    security_rule {
+        name                       = "AllowSshRdpOutbound2"
+        priority                   = 110
+        direction                  = "Outbound"
+        access                     = "Allow"
+        protocol                   = "*"
+        source_port_range          = "*"
+        destination_port_range     ="3389"
+        source_address_prefix      = "*"
+        destination_address_prefix = "VirtualNetwork"
+    }
+
+    security_rule {
+        name                       = "AllowAzureCloudOutbound"
+        priority                   = 120
+        direction                  = "Outbound"
+        access                     = "Allow"
+        protocol                   = "Tcp"
+        source_port_range          = "*"
+        destination_port_range     = "443"
+        source_address_prefix      = "*"
+        destination_address_prefix = "AzureCloud"
+    }
+
+    security_rule {
+        name                       = "AllowBastionCommunication1"
+        priority                   = 130
+        direction                  = "Outbound"
+        access                     = "Allow"
+        protocol                   = "*"
+        source_port_range          = "*"
+        destination_port_range     = "8080"
+        source_address_prefix      = "VirtualNetwork"
+        destination_address_prefix = "VirtualNetwork"
+    }
+
+    security_rule {
+        name                       = "AllowBastionCommunication2"
+        priority                   = 140
+        direction                  = "Outbound"
+        access                     = "Allow"
+        protocol                   = "*"
+        source_port_range          = "*"
+        destination_port_range    = "5701"
+        source_address_prefix      = "VirtualNetwork"
+        destination_address_prefix = "VirtualNetwork"
+    }
+
+    security_rule {
+        name                       = "AllowGetSessionInformation"
+        priority                   = 150
+        direction                  = "Outbound"
+        access                     = "Allow"
+        protocol                   = "*"
+        source_port_range          = "*"
+        destination_port_range     = "80"
+        source_address_prefix      = "*"
+        destination_address_prefix = "Internet"
+    }
+
+}
+
+
+#Connect the security group to the network interface
+resource "azurerm_network_interface_security_group_association" "nsgassoc" {
+    network_interface_id      = azurerm_network_interface.mytestnic.id
+    network_security_group_id = azurerm_network_security_group.mytestnsg.id
+    
+}
+#Create Azure VM - Standard F2 size
+resource "azurerm_windows_virtual_machine" "main" {
+  name                            = "${var.prefix}-vm"
+  resource_group_name             = azurerm_resource_group.main.name
+  location                        = azurerm_resource_group.main.location
+  size                            = "Standard_F2"
+  admin_username                  = "myuser"
+  admin_password                  = "P@sSW0rD12345!"
+  network_interface_ids = [azurerm_network_interface.mytestnic.id]
 
   source_image_reference {
     publisher = "MicrosoftWindowsServer"
     offer     = "WindowsServer"
     sku       = "2016-Datacenter"
     version   = "latest"
+  }
+
+  os_disk {
+    storage_account_type = "Standard_LRS"
+    caching              = "ReadWrite"
   }
 }
